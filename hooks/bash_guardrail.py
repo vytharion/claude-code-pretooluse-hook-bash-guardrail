@@ -1,9 +1,9 @@
-"""PreToolUse Bash guardrail — lesson 2.
+"""PreToolUse Bash guardrail — lesson 3.
 
-Adds a catalog of dangerous-command regexes. This lesson still ALLOWS
-every command but emits a `severity=block` log line whenever a pattern
-matches. Run a few candidate commands through it; tail the log to see
-what lesson 3 will start denying.
+Switches from detect-only to active deny. When a rule matches, return
+`permissionDecision: "deny"` with `permissionDecisionReason` set to a
+crisp explanation. Claude Code surfaces the reason to the agent so the
+next turn can propose a safer command instead of dying opaquely.
 """
 
 from __future__ import annotations
@@ -30,27 +30,27 @@ BLOCK_RULES: tuple[Rule, ...] = (
     Rule(
         name="rm-rf-root-or-home",
         pattern=re.compile(r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-rf|-fr)\b.*(/|~|\$HOME)\b"),
-        reason="rm -rf against root, home, or absolute paths is irreversible",
+        reason="rm -rf against root, home, or absolute paths is irreversible; restrict to a scoped temp dir",
     ),
     Rule(
         name="git-force-push",
         pattern=re.compile(r"\bgit\s+push\b.*(--force|-f\b|\+)"),
-        reason="force-push rewrites remote history; reach for --force-with-lease at minimum",
+        reason="force-push rewrites remote history; use --force-with-lease and target a feature branch",
     ),
     Rule(
         name="sql-drop-or-truncate",
         pattern=re.compile(r"\b(DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE\s+TABLE)\b", re.IGNORECASE),
-        reason="DROP/TRUNCATE in a one-shot Bash command bypasses migration review",
+        reason="DROP/TRUNCATE in a one-shot Bash command bypasses migration review; write a migration file",
     ),
     Rule(
         name="dd-of-device",
         pattern=re.compile(r"\bdd\b.*\bof=/dev/(sd|nvme|disk)"),
-        reason="dd to a block device wipes the disk; use a named image file instead",
+        reason="dd to a block device wipes the disk; target a named image file instead",
     ),
     Rule(
         name="chmod-recursive-root",
         pattern=re.compile(r"\bchmod\s+-R\s+[0-7]{3,4}\s+/(?!tmp/|var/tmp/)"),
-        reason="recursive chmod outside /tmp typically wrecks system permissions",
+        reason="recursive chmod outside /tmp wrecks system permissions; scope the path",
     ),
 )
 
@@ -67,6 +67,21 @@ def first_match(command: str) -> Rule | None:
     return None
 
 
+def decide(command: str) -> dict[str, str]:
+    matched = first_match(command)
+    if matched is None:
+        return {
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "guardrail: no rule matched",
+            "_rule": "none",
+        }
+    return {
+        "permissionDecision": "deny",
+        "permissionDecisionReason": f"[guardrail:{matched.name}] {matched.reason}",
+        "_rule": matched.name,
+    }
+
+
 def main() -> int:
     raw = sys.stdin.read()
     if not raw.strip():
@@ -77,16 +92,17 @@ def main() -> int:
     tool_name = payload.get("tool_name", "")
     command = payload.get("tool_input", {}).get("command", "")
 
-    matched = first_match(command)
-    severity = "block" if matched else "allow"
-    rule_name = matched.name if matched else "none"
-    log(f"severity={severity} rule={rule_name} tool={tool_name} command={command!r}")
+    verdict = decide(command)
+    log(
+        f"decision={verdict['permissionDecision']} rule={verdict['_rule']} "
+        f"tool={tool_name} command={command!r}"
+    )
 
     response = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-            "permissionDecisionReason": "guardrail: detect-only mode",
+            "permissionDecision": verdict["permissionDecision"],
+            "permissionDecisionReason": verdict["permissionDecisionReason"],
         }
     }
     sys.stdout.write(json.dumps(response))
