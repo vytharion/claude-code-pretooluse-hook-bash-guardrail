@@ -1,7 +1,7 @@
-"""PreToolUse Bash guardrail — lesson 4.
+"""PreToolUse Bash guardrail — final.
 
-Adds per-rule allowlists. `rm -rf /tmp/build-xyz` should not pay the same
-tax as `rm -rf /`. `git push --force-with-lease feature/foo` is a
+Pattern catalog + per-rule allowlists. `rm -rf /tmp/build-xyz` should
+not pay the same tax as `rm -rf /`. `git push --force-with-lease` is a
 reviewed, safe-by-default workflow; blanket-banning `--force-anything`
 just teaches the agent to copy-paste bigger commands to dodge regex.
 
@@ -35,12 +35,12 @@ class Rule:
 BLOCK_RULES: tuple[Rule, ...] = (
     Rule(
         name="rm-rf-root-or-home",
-        pattern=re.compile(r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-rf|-fr)\b.*(/|~|\$HOME)\b"),
+        pattern=re.compile(r"\brm\s+-[rRfF]+\s+(/|~|\$HOME)"),
         reason="rm -rf against root, home, or absolute paths is irreversible; restrict to a scoped temp dir",
         safe_if_matches=(
-            re.compile(r"\brm\s+-[rf]+\s+/tmp/[\w.\-]+(?:/|$)"),
-            re.compile(r"\brm\s+-[rf]+\s+/var/tmp/[\w.\-]+(?:/|$)"),
-            re.compile(r"\brm\s+-[rf]+\s+\$TMPDIR/[\w.\-]+"),
+            re.compile(r"\brm\s+-[rRfF]+\s+/tmp/[\w.\-]+"),
+            re.compile(r"\brm\s+-[rRfF]+\s+/var/tmp/[\w.\-]+"),
+            re.compile(r"\brm\s+-[rRfF]+\s+\$TMPDIR/[\w.\-]+"),
         ),
     ),
     Rule(
