@@ -1,9 +1,14 @@
-"""PreToolUse Bash guardrail — lesson 3.
+"""PreToolUse Bash guardrail — lesson 4.
 
-Switches from detect-only to active deny. When a rule matches, return
-`permissionDecision: "deny"` with `permissionDecisionReason` set to a
-crisp explanation. Claude Code surfaces the reason to the agent so the
-next turn can propose a safer command instead of dying opaquely.
+Adds per-rule allowlists. `rm -rf /tmp/build-xyz` should not pay the same
+tax as `rm -rf /`. `git push --force-with-lease feature/foo` is a
+reviewed, safe-by-default workflow; blanket-banning `--force-anything`
+just teaches the agent to copy-paste bigger commands to dodge regex.
+
+Pattern: every Rule may declare a tuple of `safe_if_matches` patterns.
+After the primary match fires, the hook checks each safe pattern; the
+first one that matches downgrades the verdict to allow with a reason
+that mentions the allowlist (so the audit trail stays honest).
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -24,6 +29,7 @@ class Rule:
     name: str
     pattern: re.Pattern[str]
     reason: str
+    safe_if_matches: tuple[re.Pattern[str], ...] = field(default_factory=tuple)
 
 
 BLOCK_RULES: tuple[Rule, ...] = (
@@ -31,16 +37,27 @@ BLOCK_RULES: tuple[Rule, ...] = (
         name="rm-rf-root-or-home",
         pattern=re.compile(r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-rf|-fr)\b.*(/|~|\$HOME)\b"),
         reason="rm -rf against root, home, or absolute paths is irreversible; restrict to a scoped temp dir",
+        safe_if_matches=(
+            re.compile(r"\brm\s+-[rf]+\s+/tmp/[\w.\-]+(?:/|$)"),
+            re.compile(r"\brm\s+-[rf]+\s+/var/tmp/[\w.\-]+(?:/|$)"),
+            re.compile(r"\brm\s+-[rf]+\s+\$TMPDIR/[\w.\-]+"),
+        ),
     ),
     Rule(
         name="git-force-push",
         pattern=re.compile(r"\bgit\s+push\b.*(--force|-f\b|\+)"),
         reason="force-push rewrites remote history; use --force-with-lease and target a feature branch",
+        safe_if_matches=(
+            re.compile(r"\bgit\s+push\b.*--force-with-lease(?!\S)"),
+        ),
     ),
     Rule(
         name="sql-drop-or-truncate",
         pattern=re.compile(r"\b(DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE\s+TABLE)\b", re.IGNORECASE),
         reason="DROP/TRUNCATE in a one-shot Bash command bypasses migration review; write a migration file",
+        safe_if_matches=(
+            re.compile(r"--guardrail-allow=migration", re.IGNORECASE),
+        ),
     ),
     Rule(
         name="dd-of-device",
@@ -67,6 +84,13 @@ def first_match(command: str) -> Rule | None:
     return None
 
 
+def matches_allowlist(rule: Rule, command: str) -> re.Pattern[str] | None:
+    for safe in rule.safe_if_matches:
+        if safe.search(command):
+            return safe
+    return None
+
+
 def decide(command: str) -> dict[str, str]:
     matched = first_match(command)
     if matched is None:
@@ -74,6 +98,15 @@ def decide(command: str) -> dict[str, str]:
             "permissionDecision": "allow",
             "permissionDecisionReason": "guardrail: no rule matched",
             "_rule": "none",
+        }
+    safe = matches_allowlist(matched, command)
+    if safe is not None:
+        return {
+            "permissionDecision": "allow",
+            "permissionDecisionReason": (
+                f"[guardrail:{matched.name}/allow] matched {safe.pattern}"
+            ),
+            "_rule": f"{matched.name}/allow",
         }
     return {
         "permissionDecision": "deny",
